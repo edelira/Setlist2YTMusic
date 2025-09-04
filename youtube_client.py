@@ -8,11 +8,14 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from config import YOUTUBE_SCOPES, GOOGLE_CLIENT_SECRET_FILE, YOUTUBE_TOKEN_FILE, YOUTUBE_REGION_CODE
 from setlist_parser import Track
+from video_cache import VideoCache
 
 
 class YouTubeClient:
     def __init__(self):
         self.service = None
+        self.cache = VideoCache()
+        self.quota_used = 0
         self._authenticate()
     
     def _authenticate(self):
@@ -76,9 +79,12 @@ class YouTubeClient:
         except HttpError as e:
             raise RuntimeError(f"Failed to create playlist: {e}")
     
-    def search_video(self, query: str, max_results: int = 5) -> Optional[str]:
-        """Search for a video and return the best match video ID."""
+    def search_video(self, query: str, max_results: int = 3) -> Optional[Tuple[str, str, str]]:
+        """Search for a video and return (video_id, title, channel)."""
         try:
+            # Track quota usage (search costs 100 units)
+            self.quota_used += 100
+            
             search_params = {
                 "part": "id,snippet",
                 "q": query,
@@ -97,8 +103,13 @@ class YouTubeClient:
             if not items:
                 return None
             
-            # Return the first (most relevant) result
-            return items[0]["id"]["videoId"]
+            # Return the first (most relevant) result with metadata
+            item = items[0]
+            video_id = item["id"]["videoId"]
+            title = item["snippet"]["title"]
+            channel = item["snippet"]["channelTitle"]
+            
+            return (video_id, title, channel)
         
         except HttpError as e:
             print(f"Search failed for '{query}': {e}")
@@ -107,6 +118,9 @@ class YouTubeClient:
     def add_video_to_playlist(self, playlist_id: str, video_id: str) -> bool:
         """Add a video to a playlist. Returns True if successful."""
         try:
+            # Track quota usage (playlist insert costs 50 units)
+            self.quota_used += 50
+            
             request = self.service.playlistItems().insert(
                 part="snippet",
                 body={
@@ -127,35 +141,42 @@ class YouTubeClient:
             return False
     
     def build_search_queries(self, track: Track) -> List[str]:
-        """Build search queries for a track, trying different combinations."""
+        """Build optimized search queries for a track."""
         queries = []
         
         # If it's a cover, prioritize the original artist
         if track.is_cover and track.original_artist:
             queries.append(f"{track.title} {track.original_artist}")
-            queries.append(f'"{track.title}" {track.original_artist}')
             queries.append(f"{track.title} - {track.original_artist}")
-            # Also try the performing artist as fallback
+            # Fallback to performing artist
             queries.append(f"{track.title} {track.artist}")
         else:
             # Not a cover, use the performing artist
             queries.append(f"{track.title} {track.artist}")
-            queries.append(f'"{track.title}" {track.artist}')
             queries.append(f"{track.title} - {track.artist}")
         
-        # Add some generic fallbacks
+        # Only add one generic fallback to reduce queries
         queries.append(f"{track.title} official")
-        queries.append(f"{track.title} audio")
         
         return queries
     
     def find_best_match(self, track: Track) -> Optional[str]:
-        """Find the best YouTube video match for a track."""
+        """Find the best YouTube video match for a track with caching."""
+        # Check cache first
+        cached = self.cache.get(track.title, track.artist)
+        if cached:
+            print(f"  [CACHED] {track.title} -> {cached.title}")
+            return cached.video_id
+        
+        # Search with optimized queries
         queries = self.build_search_queries(track)
         
         for query in queries:
-            video_id = self.search_video(query)
-            if video_id:
+            result = self.search_video(query)
+            if result:
+                video_id, title, channel = result
+                # Cache the result
+                self.cache.set(track.title, track.artist, video_id, title, channel, query)
                 return video_id
         
         return None
@@ -163,3 +184,23 @@ class YouTubeClient:
     def get_playlist_url(self, playlist_id: str) -> str:
         """Get the YouTube playlist URL."""
         return f"https://www.youtube.com/playlist?list={playlist_id}"
+    
+    def get_quota_usage(self) -> dict:
+        """Get current quota usage statistics."""
+        cache_stats = self.cache.get_stats()
+        return {
+            'quota_used': self.quota_used,
+            'estimated_remaining': 10000 - self.quota_used,  # Free tier limit
+            'cache_hits': cache_stats['total_entries'],
+            'recent_cache_hits': cache_stats['recent_entries']
+        }
+    
+    def check_quota_limit(self, additional_quota: int = 0) -> bool:
+        """Check if we're approaching quota limits."""
+        total_quota = self.quota_used + additional_quota
+        return total_quota < 9500  # Leave some buffer
+    
+    def clear_cache(self):
+        """Clear the video cache."""
+        self.cache.clear_expired()
+        print("Cache cleared of expired entries.")

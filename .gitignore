@@ -5,6 +5,9 @@
 client_secret.json
 youtube_token.json
 
+# Cache files
+video_cache.json
+
 # Python
 __pycache__/
 *.py[cod]

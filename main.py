@@ -84,6 +84,15 @@ def process_playlist_creation(setlist: SetlistInfo, privacy: str, dry_run: bool 
     
     youtube = YouTubeClient()
     
+    # Check quota before starting
+    quota_info = youtube.get_quota_usage()
+    estimated_quota_needed = len(setlist.tracks) * 150  # 100 for search + 50 for add
+    
+    if not youtube.check_quota_limit(estimated_quota_needed):
+        console.print(f"[red]⚠️  Warning: Estimated quota usage ({quota_info['quota_used'] + estimated_quota_needed}) may exceed daily limit![/red]")
+        console.print(f"[yellow]Current usage: {quota_info['quota_used']}/10000 units[/yellow]")
+        console.print(f"[yellow]Cache hits available: {quota_info['cache_hits']} songs[/yellow]")
+    
     playlist_id = None
     playlist_url = ""
     
@@ -115,6 +124,11 @@ def process_playlist_creation(setlist: SetlistInfo, privacy: str, dry_run: bool 
         for i, track in enumerate(setlist.tracks, 1):
             progress.update(task, description=f"Searching for: {track.title}")
             
+            # Check quota before each search
+            if not youtube.check_quota_limit(150):  # 100 for search + 50 for add
+                console.print(f"[red]⚠️  Quota limit reached! Stopping at track {i}[/red]")
+                break
+            
             # Find best match
             video_id = youtube.find_best_match(track)
             
@@ -141,7 +155,7 @@ def process_playlist_creation(setlist: SetlistInfo, privacy: str, dry_run: bool 
     return playlist_url, found_tracks, not_found_tracks
 
 
-def display_results(playlist_url: str, found_tracks: List[Track], not_found_tracks: List[Track], dry_run: bool = False):
+def display_results(playlist_url: str, found_tracks: List[Track], not_found_tracks: List[Track], dry_run: bool = False, youtube_client=None):
     """Display the final results."""
     
     if not dry_run and playlist_url:
@@ -159,6 +173,12 @@ def display_results(playlist_url: str, found_tracks: List[Track], not_found_trac
             title="Dry Run Results",
             border_style="yellow"
         ))
+    
+    # Show quota usage if available
+    if youtube_client:
+        quota_info = youtube_client.get_quota_usage()
+        console.print(f"\n[cyan]Quota Usage: {quota_info['quota_used']}/10000 units used[/cyan]")
+        console.print(f"[cyan]Cache hits: {quota_info['cache_hits']} songs cached[/cyan]")
     
     if not_found_tracks:
         console.print("\n[red]Tracks not found:[/red]")
@@ -194,11 +214,30 @@ Examples:
         action="store_true",
         help="Display the track list before processing"
     )
+    parser.add_argument(
+        "--clear-cache", 
+        action="store_true",
+        help="Clear the video cache before processing"
+    )
+    parser.add_argument(
+        "--quota-status", 
+        action="store_true",
+        help="Show current quota usage and cache status"
+    )
     
     args = parser.parse_args()
     
     try:
         console.print(Panel("[bold blue]Setlist2YTMusic[/bold blue]", subtitle="Converting setlist.fm to YouTube Music"))
+        
+        # Handle special commands
+        if args.quota_status:
+            youtube = YouTubeClient()
+            quota_info = youtube.get_quota_usage()
+            console.print(f"\n[cyan]Quota Usage: {quota_info['quota_used']}/10000 units used[/cyan]")
+            console.print(f"[cyan]Cache entries: {quota_info['cache_hits']} songs cached[/cyan]")
+            console.print(f"[cyan]Recent cache hits: {quota_info['recent_cache_hits']} in last 24h[/cyan]")
+            return 0
         
         # Parse the setlist
         with console.status("[bold blue]Fetching setlist data..."):
@@ -222,12 +261,18 @@ Examples:
                     return 0
         
         # Create the playlist
+        youtube = YouTubeClient()
+        
+        # Clear cache if requested
+        if args.clear_cache:
+            youtube.clear_cache()
+        
         playlist_url, found_tracks, not_found_tracks = process_playlist_creation(
             setlist, args.privacy, args.dry_run
         )
         
         # Display results
-        display_results(playlist_url, found_tracks, not_found_tracks, args.dry_run)
+        display_results(playlist_url, found_tracks, not_found_tracks, args.dry_run, youtube)
         
         return 0
         
